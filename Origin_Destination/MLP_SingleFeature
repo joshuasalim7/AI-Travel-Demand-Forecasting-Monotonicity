@@ -1,4 +1,4 @@
-# MLP (Single Feature Monotonicity Model)
+# MLP Model (Single-Feature Monotonicity)
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -6,152 +6,106 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Input, Layer, Dropout
+from tensorflow.keras.layers import Dense, Input, Layer
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
-import logging
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 np.random.seed(42)
 tf.random.set_seed(42)
 
-# Load the dataset
+# Load the data
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
+data = data.dropna()
 
-# Remove rows with NaN values
-data = data.dropna()  
+monotonic_features = ['downtown_downtown']
 
 X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
-y = data['total_number_trips'] / 101  # 101 days in the dataset 
+y = data['total_number_trips'] / 101
 
-# Check the distribution of downtown vs non-downtown
-is_downtown = X.iloc[:, -1] == 1
-print(f"Total samples: {len(X)}")
-print(f"Downtown samples: {sum(is_downtown)}")
-print(f"Non-downtown samples: {sum(~is_downtown)}")
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
 
-# Stratified split 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=X.iloc[:, -1], random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
 
-# Normalize the features
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
 
-# Normalize the target variable
 target_scaler = StandardScaler()
 y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_val_scaled = target_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
 y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
 
-# Stochastic Monotonicity
-class StochasticMonotonicityLayer(Layer):
-    def __init__(self, lam, **kwargs):
-        super(StochasticMonotonicityLayer, self).__init__(**kwargs)
-        self.lam = lam
+class FeatureSelector(Layer):
+    def __init__(self, feature_indices, **kwargs):
+        super(FeatureSelector, self).__init__(**kwargs)
+        self.feature_indices = feature_indices
+
+    def call(self, inputs):
+        return tf.gather(inputs, self.feature_indices, axis=1)
+
+class MultiMonotonicityLayer(Layer):
+    def __init__(self, num_features, lambda_param, **kwargs):
+        super(MultiMonotonicityLayer, self).__init__(**kwargs)
+        self.num_features = num_features
+        self.lambda_param = lambda_param
 
     def build(self, input_shape):
-        self.w = self.add_weight(shape=(1,),
+        self.w = self.add_weight(shape=(self.num_features,),
                                  initializer='ones',
                                  trainable=True,
                                  constraint=tf.keras.constraints.NonNeg(),
-                                 name='monotonicity_weight')
-        super(StochasticMonotonicityLayer, self).build(input_shape)
+                                 name='monotonicity_weights')
+        super(MultiMonotonicityLayer, self).build(input_shape)
 
-    def call(self, inputs, training=None):
-        features, predictions = inputs
-        is_downtown = features[:, -1:]
-        downtown_effect = self.lam * self.w * is_downtown
-        if training:
-            # Add stochastic component during training
-            noise = tf.keras.backend.random_normal(shape=tf.shape(downtown_effect), mean=0.0, stddev=0.1)
-            downtown_effect += noise
-        adjusted_predictions = predictions + downtown_effect
-        return adjusted_predictions
+    def call(self, inputs):
+        features, base_predictions = inputs
+        if self.lambda_param == 0:
+            return base_predictions
+        monotonic_effects = self.lambda_param * tf.reduce_sum(self.w * features, axis=1, keepdims=True)
+        return base_predictions + monotonic_effects
 
-# Create MLP model
-def create_stochastic_model(input_shape, lam):
+def create_mlp_multi_constraint_model(input_shape, num_monotonic_features, lambda_param):
     inputs = Input(shape=(input_shape,))
-    x = Dense(128, activation='relu')(inputs)
-    x = Dropout(0.3)(x)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.3)(x)
+    x = Dense(64, activation='relu')(inputs)
     x = Dense(32, activation='relu')(x)
-    x = Dropout(0.3)(x)
-    predictions = Dense(1)(x)
-    outputs = StochasticMonotonicityLayer(lam)([inputs, predictions])
+    base_predictions = Dense(1)(x)
+    
+    monotonic_features = FeatureSelector(monotonic_indices)(inputs)
+    outputs = MultiMonotonicityLayer(num_monotonic_features, lambda_param)([monotonic_features, base_predictions])
 
     model = Model(inputs=inputs, outputs=outputs)
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
     return model
 
-def calculate_monotonicity_satisfaction(X_test, predictions):
-    is_downtown_test = X_test[:, -1]
-    total_pairs = 0
-    satisfied_pairs = 0
-
-    for i in range(len(predictions)):
-        for j in range(i+1, len(predictions)):
-            if is_downtown_test[i] != is_downtown_test[j]:
-                total_pairs += 1
-                if (is_downtown_test[i] > is_downtown_test[j] and predictions[i] > predictions[j]) or \
-                   (is_downtown_test[i] < is_downtown_test[j] and predictions[i] < predictions[j]):
-                    satisfied_pairs += 1
-
-    return satisfied_pairs / total_pairs if total_pairs > 0 else 1.0
-
-# Train model
-def train_and_evaluate_stochastic(lam, batch_size):
-    model = create_stochastic_model(X_train_scaled.shape[1], lam)
+def train_and_evaluate_model(batch_size, lambda_param):
+    model = create_mlp_multi_constraint_model(X_train_scaled.shape[1], len(monotonic_features), lambda_param)
 
     early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
 
-    try:
-        history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_test_scaled, y_test_scaled),
-                            epochs=200, batch_size=batch_size, callbacks=[early_stopping], verbose=0)
+    history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_val_scaled, y_val_scaled),
+                        epochs=200, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
 
-        predictions_scaled = model.predict(X_test_scaled)
-        predictions = target_scaler.inverse_transform(predictions_scaled)
+    predictions_scaled = model.predict(X_test_scaled)
+    predictions = target_scaler.inverse_transform(predictions_scaled)
 
-        mse = mean_squared_error(y_test, predictions)
+    mse = mean_squared_error(y_test, predictions)
 
-        is_downtown_test = X_test.iloc[:, -1] == 1
-        avg_downtown = np.mean(predictions[is_downtown_test])
-        avg_non_downtown = np.mean(predictions[~is_downtown_test])
+    return mse, history, predictions
 
-        return mse, history, avg_downtown, avg_non_downtown, model, predictions, is_downtown_test
-    except Exception as e:
-        logging.error(f"Error during model training or evaluation: {str(e)}")
-        return None, None, None, None, None, None, None
-
-lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1]
+# Hyperparameters for training 
 batch_size = 64
+lambda_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
 results = []
 
-avg_downtown_list = []
-avg_non_downtown_list = []
-monotonicity_satisfaction_list = []
-
-for lam in lam_values:
-    mse, history, avg_downtown, avg_non_downtown, model, predictions, is_downtown_test = train_and_evaluate_stochastic(lam, batch_size)
-    if mse is not None:
-        monotonicity_satisfaction = calculate_monotonicity_satisfaction(X_test_scaled, predictions)
-
-        results.append((lam, mse, 0))
-        avg_downtown_list.append(avg_downtown)
-        avg_non_downtown_list.append(avg_non_downtown)
-        monotonicity_satisfaction_list.append(monotonicity_satisfaction)
-
-        print(f"Lambda: {lam}")
-        print(f"MSE: {mse}")
-        print(f"Average prediction for downtown: {avg_downtown}")
-        print(f"Average prediction for non-downtown: {avg_non_downtown}")
-        print(f"Monotonicity satisfaction: {monotonicity_satisfaction:.2%}")
-        print(f"Number of downtown samples: {sum(is_downtown_test)}")
-        print(f"Number of non-downtown samples: {sum(~is_downtown_test)}")
-        print("-" * 50)
-    else:
-        print(f"Skipping Lambda: {lam} due to error")
+for lambda_param in lambda_values:
+    mse, _, predictions = train_and_evaluate_model(batch_size, lambda_param)
+    results.append((lambda_param, mse))
+    print(f"Lambda: {lambda_param}, MSE: {mse}")
 
 print("\nSummary of Results:")
-for lam, mse, _ in results:
-    print(f"Lambda: {lam}, MSE: {mse}")
+for lambda_param, mse in results:
+    print(f"Lambda: {lambda_param}, MSE: {mse}")
