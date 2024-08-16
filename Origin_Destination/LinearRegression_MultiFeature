@@ -1,0 +1,113 @@
+# Linear Regression (Monotonically Tuning 1+ Variables)
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Layer
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+import logging
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Load the data
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+monotonic_features = [
+    'downtown_downtown',
+    'EmpDen_Des', 'EmpDen_Ori',
+    'Commuters_HW', 'Commuters_WH'
+]
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_val_scaled = target_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+class FeatureSelector(Layer):
+    def __init__(self, feature_indices, **kwargs):
+        super(FeatureSelector, self).__init__(**kwargs)
+        self.feature_indices = feature_indices
+
+    def call(self, inputs):
+        return tf.gather(inputs, self.feature_indices, axis=1)
+
+class MultiMonotonicityLayer(Layer):
+    def __init__(self, num_features, lambda_param, **kwargs):
+        super(MultiMonotonicityLayer, self).__init__(**kwargs)
+        self.num_features = num_features
+        self.lambda_param = lambda_param
+
+    def build(self, input_shape):
+        self.w = self.add_weight(shape=(self.num_features,),
+                                 initializer='ones',
+                                 trainable=True,
+                                 constraint=tf.keras.constraints.NonNeg(),
+                                 name='monotonicity_weights')
+        super(MultiMonotonicityLayer, self).build(input_shape)
+
+    def call(self, inputs):
+        features, base_predictions = inputs
+        if self.lambda_param == 0:
+            return base_predictions
+        monotonic_effects = self.lambda_param * tf.reduce_sum(self.w * features, axis=1, keepdims=True)
+        return base_predictions + monotonic_effects
+
+def create_linear_multi_constraint_model(input_shape, num_monotonic_features, lambda_param):
+    inputs = Input(shape=(input_shape,))
+    base_predictions = Dense(1, use_bias=True)(inputs)
+    monotonic_features = FeatureSelector(monotonic_indices)(inputs)
+    outputs = MultiMonotonicityLayer(num_monotonic_features, lambda_param)([monotonic_features, base_predictions])
+
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+def train_and_evaluate_model(batch_size, lambda_param):
+    model = create_linear_multi_constraint_model(X_train_scaled.shape[1], len(monotonic_features), lambda_param)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+
+    history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_val_scaled, y_val_scaled),
+                        epochs=200, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+    predictions_scaled = model.predict(X_test_scaled)
+    predictions = target_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+
+    return mse, history, predictions
+
+# Hyperparameters for training 
+batch_size = 64
+lambda_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+results = []
+
+for lambda_param in lambda_values:
+    mse, _, predictions = train_and_evaluate_model(batch_size, lambda_param)
+    results.append((lambda_param, mse))
+    print(f"Lambda: {lambda_param}, MSE: {mse}")
+
+print("\nSummary of Results:")
+for lambda_param, mse in results:
+    print(f"Lambda: {lambda_param}, MSE: {mse}")
