@@ -14,19 +14,13 @@ import logging
 np.random.seed(42)
 tf.random.set_seed(42)
 
-logging.basicConfig(level=logging.INFO)
-
 # Load the dataset
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
 
-# Check for NaN values
-logging.info(f"NaN values in the dataset:\n{data.isna().sum()}")
-
 # Remove rows with NaN values
 data = data.dropna() 
 
-# Define our features and target
 X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
 y = data['total_number_trips'] / 101  # 101 days in the dataset 
 
@@ -112,7 +106,7 @@ def calculate_monotonicity_satisfaction(X_test, predictions):
 
     return satisfied_pairs / total_pairs if total_pairs > 0 else 1.0
 
-# Train and evaluate the model
+# Train model 
 def train_and_evaluate_stochastic_cnn(lam, batch_size):
     model = create_stochastic_cnn_model(X_train_reshaped.shape[1:], lam)
 
