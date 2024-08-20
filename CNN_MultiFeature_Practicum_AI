@@ -1,0 +1,161 @@
+# CNN Multi-Feature Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout, Conv1D, GlobalAveragePooling1D, Reshape, Concatenate
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+import logging
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+logging.basicConfig(level=logging.INFO)
+
+# Load and preprocess data
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+logging.info(f"NaN values in the dataset:\n{data.isna().sum()}")
+data = data.dropna()
+
+# Define features for monotonicity constraints
+monotonic_features = [
+    'downtown_downtown',
+    'EmpDen_Des', 'EmpDen_Ori',
+    'Commuters_HW', 'Commuters_WH'
+]
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_val_scaled = target_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+# Reshape the input data for CNN (add a channel dimension)
+X_train_reshaped = X_train_scaled.reshape((X_train_scaled.shape[0], X_train_scaled.shape[1], 1))
+X_val_reshaped = X_val_scaled.reshape((X_val_scaled.shape[0], X_val_scaled.shape[1], 1))
+X_test_reshaped = X_test_scaled.reshape((X_test_scaled.shape[0], X_test_scaled.shape[1], 1))
+
+class ImprovedMultiMonotonicityLayer(Layer):
+    def __init__(self, num_features, lambda_param, **kwargs):
+        super(ImprovedMultiMonotonicityLayer, self).__init__(**kwargs)
+        self.num_features = num_features
+        self.lambda_param = lambda_param
+
+    def build(self, input_shape):
+        if self.lambda_param > 0:
+            self.w = self.add_weight(shape=(self.num_features,),
+                                     initializer='ones',
+                                     trainable=True,
+                                     constraint=tf.keras.constraints.NonNeg(),
+                                     name='monotonicity_weights')
+        super(ImprovedMultiMonotonicityLayer, self).build(input_shape)
+
+    def call(self, inputs):
+        features, predictions = inputs
+        if self.lambda_param == 0:
+            return predictions
+        monotonic_effects = self.lambda_param * tf.reduce_sum(tf.math.softplus(self.w) * features, axis=1, keepdims=True)
+        adjusted_predictions = predictions + monotonic_effects
+        return adjusted_predictions
+
+def create_cnn_multi_constraint_model(input_shape, num_monotonic_features, lambda_param):
+    inputs = Input(shape=input_shape)
+    
+    # CNN layers
+    x = Conv1D(64, kernel_size=3, activation='relu', padding='same')(inputs)
+    x = Conv1D(32, kernel_size=3, activation='relu', padding='same')(x)
+    x = GlobalAveragePooling1D()(x)
+    
+    # Dense layers
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    predictions = Dense(1)(x)
+    
+    if lambda_param > 0:
+        # Extract monotonic features
+        monotonic_features = Reshape((input_shape[0],))(inputs)
+        monotonic_features = tf.gather(monotonic_features, monotonic_indices, axis=1)
+        outputs = ImprovedMultiMonotonicityLayer(num_monotonic_features, lambda_param)([monotonic_features, predictions])
+    else:
+        outputs = predictions
+
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+def calculate_monotonicity_satisfaction(feature_values, predictions):
+    return np.mean((predictions.flatten() - np.mean(predictions)) * 
+                   (feature_values - np.mean(feature_values)) > 0)
+
+def train_and_evaluate_model(batch_size, lambda_param):
+    model = create_cnn_multi_constraint_model(X_train_reshaped.shape[1:], len(monotonic_features), lambda_param)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+
+    history = model.fit(X_train_reshaped, y_train_scaled, validation_data=(X_val_reshaped, y_val_scaled),
+                        epochs=200, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+    predictions_scaled = model.predict(X_test_reshaped)
+    predictions = target_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+
+    return mse, history, model, predictions
+
+# Train and evaluate the model for different lambda values
+batch_size = 32
+lambda_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+results = []
+
+for lambda_param in lambda_values:
+    mse, history, model, predictions = train_and_evaluate_model(batch_size, lambda_param)
+    
+    monotonicity_satisfactions = {}
+    for i, feature in enumerate(monotonic_features):
+        feature_values = X_test_scaled[:, monotonic_indices[i]]
+        monotonicity_satisfactions[feature] = calculate_monotonicity_satisfaction(feature_values, predictions)
+    
+    results.append((lambda_param, mse, monotonicity_satisfactions))
+    
+    print(f"\nLambda: {lambda_param}")
+    print(f"MSE: {mse}")
+    for feature, satisfaction in monotonicity_satisfactions.items():
+        print(f"Monotonicity satisfaction for {feature}: {satisfaction:.2%}")
+
+# Print summary of results
+print("\nSummary of Results:")
+for lambda_param, mse, _ in results:
+    print(f"Lambda: {lambda_param}, MSE: {mse}")
+
+# Find the best lambda value (lowest MSE)
+best_lambda, best_mse, _ = min(results, key=lambda x: x[1])
+print(f"\nBest Lambda: {best_lambda}")
+print(f"Best MSE: {best_mse}")
+
+# Print monotonicity satisfactions for the best lambda
+_, _, best_monotonicity_satisfactions = next(r for r in results if r[0] == best_lambda)
+print("\nMonotonicity satisfactions for the best lambda:")
+for feature, satisfaction in best_monotonicity_satisfactions.items():
+    print(f"{feature}: {satisfaction:.2%}")
