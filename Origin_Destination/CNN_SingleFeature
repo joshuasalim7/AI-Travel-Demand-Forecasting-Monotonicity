@@ -1,4 +1,5 @@
 # CNN Model (Single-Feature Monotonicity)
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -6,113 +7,117 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Dense, Input, Layer, Conv1D, GlobalAveragePooling1D, Reshape
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout, Conv1D, GlobalAveragePooling1D, Reshape
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping
+import logging
 
 np.random.seed(42)
 tf.random.set_seed(42)
 
-# Load the data
+logging.basicConfig(level=logging.INFO)
+
+# Load and preprocess the dataset
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
 data = data.dropna()
 
-monotonic_features = ['downtown_downtown']
-
 X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
 y = data['total_number_trips'] / 101
 
-monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=X.iloc[:, -1], random_state=42)
 
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
-X_val_scaled = scaler.transform(X_val)
 X_test_scaled = scaler.transform(X_test)
 
 target_scaler = StandardScaler()
 y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
-y_val_scaled = target_scaler.transform(y_val.values.reshape(-1, 1)).flatten()
 y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
 
-# Reshape the input data for CNN by adding channels 
+# Reshape the input data for CNN (add a channel dimension)
 X_train_reshaped = X_train_scaled.reshape((X_train_scaled.shape[0], X_train_scaled.shape[1], 1))
-X_val_reshaped = X_val_scaled.reshape((X_val_scaled.shape[0], X_val_scaled.shape[1], 1))
 X_test_reshaped = X_test_scaled.reshape((X_test_scaled.shape[0], X_test_scaled.shape[1], 1))
 
-class FeatureSelector(Layer):
-    def __init__(self, feature_indices, **kwargs):
-        super(FeatureSelector, self).__init__(**kwargs)
-        self.feature_indices = feature_indices
-
-    def call(self, inputs):
-        return tf.gather(inputs, self.feature_indices, axis=1)
-
-class MultiMonotonicityLayer(Layer):
-    def __init__(self, num_features, lambda_param, **kwargs):
-        super(MultiMonotonicityLayer, self).__init__(**kwargs)
-        self.num_features = num_features
-        self.lambda_param = lambda_param
+# Stochastic Monotonicity Layer
+class StochasticMonotonicityLayer(Layer):
+    def __init__(self, lam, **kwargs):
+        super(StochasticMonotonicityLayer, self).__init__(**kwargs)
+        self.lam = lam
 
     def build(self, input_shape):
-        self.w = self.add_weight(shape=(self.num_features,),
-                                 initializer='ones',
-                                 trainable=True,
-                                 constraint=tf.keras.constraints.NonNeg(),
-                                 name='monotonicity_weights')
-        super(MultiMonotonicityLayer, self).build(input_shape)
+        self.monotonicity_weight = self.add_weight(shape=(1,),
+                                                  initializer='ones',
+                                                  trainable=True,
+                                                  constraint=tf.keras.constraints.NonNeg(),
+                                                  name='monotonicity_weight')
+        super(StochasticMonotonicityLayer, self).build(input_shape)
 
     def call(self, inputs):
-        features, base_predictions = inputs
-        if self.lambda_param == 0:
-            return base_predictions
-        monotonic_effects = self.lambda_param * tf.reduce_sum(self.w * features, axis=1, keepdims=True)
-        return base_predictions + monotonic_effects
+        features, predictions = inputs
+        is_downtown = features[:, -1:]
+        random_values = tf.random.uniform(tf.shape(is_downtown))
+        stochastic_mask = tf.cast(random_values < self.lam, tf.float32)
+        downtown_effect = self.monotonicity_weight * is_downtown * stochastic_mask
+        adjusted_predictions = predictions + downtown_effect
+        return adjusted_predictions
 
-def create_cnn_multi_constraint_model(input_shape, num_monotonic_features, lambda_param):
+# Create the CNN model with stochastic monotonicity
+def create_stochastic_cnn_model(input_shape, lam):
     inputs = Input(shape=input_shape)
     x = Conv1D(64, kernel_size=3, activation='relu')(inputs)
     x = Conv1D(32, kernel_size=3, activation='relu')(x)
     x = GlobalAveragePooling1D()(x)
-    base_predictions = Dense(1)(x)
-    
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    predictions = Dense(1)(x)
     reshaped_inputs = Reshape((input_shape[0],))(inputs)
-    monotonic_features = FeatureSelector(monotonic_indices)(reshaped_inputs)
-    outputs = MultiMonotonicityLayer(num_monotonic_features, lambda_param)([monotonic_features, base_predictions])
-
+    outputs = StochasticMonotonicityLayer(lam)([reshaped_inputs, predictions])
     model = Model(inputs=inputs, outputs=outputs)
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    model.compile(optimizer=Adam(learning_rate=0.0005), loss='mse')
     return model
 
-def train_and_evaluate_model(batch_size, lambda_param):
-    model = create_cnn_multi_constraint_model(X_train_reshaped.shape[1:], len(monotonic_features), lambda_param)
+# Train and evaluate the model
+def train_and_evaluate_stochastic_cnn(lam, batch_size, num_runs=5):
+    all_mse = []
 
-    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+    for _ in range(num_runs):
+        model = create_stochastic_cnn_model(X_train_reshaped.shape[1:], lam)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
 
-    history = model.fit(X_train_reshaped, y_train_scaled, validation_data=(X_val_reshaped, y_val_scaled),
-                        epochs=200, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+        try:
+            model.fit(X_train_reshaped, y_train_scaled, validation_data=(X_test_reshaped, y_test_scaled),
+                      epochs=300, batch_size=batch_size, callbacks=[early_stopping], verbose=0)
 
-    predictions_scaled = model.predict(X_test_reshaped)
-    predictions = target_scaler.inverse_transform(predictions_scaled)
+            predictions_scaled = model.predict(X_test_reshaped)
+            predictions = target_scaler.inverse_transform(predictions_scaled)
 
-    mse = mean_squared_error(y_test, predictions)
+            mse = mean_squared_error(y_test, predictions)
+            all_mse.append(mse)
 
-    return mse, history, predictions
+        except Exception as e:
+            logging.error(f"Error during model training or evaluation: {str(e)}")
 
-# Hyperparameter for training 
+    if all_mse:
+        return np.mean(all_mse)
+    else:
+        return None
+
+# Test different values of lam
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1]
 batch_size = 64
-lambda_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
 results = []
 
-for lambda_param in lambda_values:
-    mse, _, predictions = train_and_evaluate_model(batch_size, lambda_param)
-    results.append((lambda_param, mse))
-    print(f"Lambda: {lambda_param}, MSE: {mse}")
+for lam in lam_values:
+    mse = train_and_evaluate_stochastic_cnn(lam, batch_size)
+    if mse is not None:
+        results.append({'lambda': lam, 'mse': mse})
+        print(f"Lambda: {lam}, MSE: {mse}")
+    else:
+        print(f"Skipping Lambda: {lam} due to error")
+
+# Create a DataFrame from the results
+results_df = pd.DataFrame(results)
 
 print("\nSummary of Results:")
-for lambda_param, mse in results:
-    print(f"Lambda: {lambda_param}, MSE: {mse}")
+print(results_df)
