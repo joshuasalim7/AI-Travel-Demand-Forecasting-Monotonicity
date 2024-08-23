@@ -139,3 +139,12 @@ results_df = pd.DataFrame(results)
 
 print("\nSummary of Results:")
 print(results_df)
+
+'''
+Convolutional layers: 2
+Dense layers: 2
+Batch normalization layers: 1 (only in the first convolutional block)
+Dropout layers: 1
+Custom layers: 1 (Stochastic Monotonicity Layer)
+'''
+Total number of layers: 7
