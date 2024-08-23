@@ -146,5 +146,11 @@ Dense layers: 2
 Batch normalization layers: 1 (only in the first convolutional block)
 Dropout layers: 1
 Custom layers: 1 (Stochastic Monotonicity Layer)
-'''
 Total number of layers: 7
+Hidden Layers: 3
+Conv1D layer with 64 filters (Convolutional Block 1)
+Conv1D layer with 32 filters (Convolutional Block 2)
+Dense layer with 64 neurons (Dense Block)
+Global Average Pooling Layer (can be considered a hidden layer, as it transforms the input)
+The output of the Dense layer with 64 neurons is passed through the Stochastic Monotonicity Layer
+'''
