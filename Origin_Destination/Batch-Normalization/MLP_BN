@@ -135,3 +135,12 @@ for lam in lam_values:
 print("\nSummary of Results:")
 for lam, mse in results:
     print(f"Lambda: {lam}, MSE: {mse}")
+
+'''
+Dense Layer 1: 128 neurons, ReLU activation, Batch Normalization
+Dropout Layer 1: dropout rate of 0.3
+Dense Layer 2: 64 neurons, ReLU activation
+Dropout Layer 2: dropout rate of 0.3
+Dense Layer 3: 32 neurons, ReLU activation
+Dropout Layer 3: dropout rate of 0.3
+'''
