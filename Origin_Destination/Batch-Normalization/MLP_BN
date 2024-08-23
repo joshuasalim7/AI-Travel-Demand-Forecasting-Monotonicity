@@ -1,0 +1,137 @@
+# Multi-feature MLP Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+import logging
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+logging.basicConfig(level=logging.INFO)
+
+# Dataset 
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+logging.info(f"NaN values in the dataset:\n{data.isna().sum()}")
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# Check our data 
+is_downtown = X.iloc[:, -1] == 1
+print(f"Total samples: {len(X)}")
+print(f"Downtown samples: {sum(is_downtown)}")
+print(f"Non-downtown samples: {sum(~is_downtown)}")
+
+# Our monotonic features
+monotonic_features = [
+    'downtown_downtown',
+    'EmpDen_Des', 'EmpDen_Ori',
+    'Commuters_HW', 'Commuters_WH'
+]
+
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=X.iloc[:, -1], random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+# Stochastic Monotonicity Layer
+class MultiFeatureStochasticMonotonicityLayer(Layer):
+    def __init__(self, lam, num_monotonic_features, **kwargs):
+        super(MultiFeatureStochasticMonotonicityLayer, self).__init__(**kwargs)
+        self.lam = lam
+        self.num_monotonic_features = num_monotonic_features
+
+    def build(self, input_shape):
+        self.w = self.add_weight(shape=(self.num_monotonic_features,),
+                                 initializer='ones',
+                                 trainable=True,
+                                 constraint=tf.keras.constraints.NonNeg(),
+                                 name='monotonicity_weights')
+        super(MultiFeatureStochasticMonotonicityLayer, self).build(input_shape)
+
+    def call(self, inputs, training=None):
+        features, predictions = inputs
+        monotonic_features = tf.gather(features, monotonic_indices, axis=1)
+        if self.lam == 0:
+            return predictions
+        else:
+            monotonic_effects = self.lam * tf.reduce_sum(self.w * monotonic_features, axis=1, keepdims=True)
+            if training:
+                noise = tf.keras.backend.random_normal(shape=tf.shape(monotonic_effects), mean=0.0, stddev=0.1)
+                monotonic_effects += noise
+            adjusted_predictions = predictions + monotonic_effects
+            return adjusted_predictions
+
+# MLP Model
+def create_stochastic_model(input_shape, num_monotonic_features, lam):
+    inputs = Input(shape=(input_shape,))
+    x = Dense(128, activation='relu')(inputs)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.3)(x)
+    predictions = Dense(1)(x)
+    outputs = MultiFeatureStochasticMonotonicityLayer(lam, num_monotonic_features)([inputs, predictions])
+
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+# Train the model 
+def train_and_evaluate_stochastic(lam, batch_size):
+    model = create_stochastic_model(X_train_scaled.shape[1], len(monotonic_features), lam)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+
+    try:
+        history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_test_scaled, y_test_scaled),
+                            epochs=300, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+        predictions_scaled = model.predict(X_test_scaled)
+        predictions = target_scaler.inverse_transform(predictions_scaled)
+
+        mse = mean_squared_error(y_test, predictions)
+
+        return mse, history, model, predictions
+    except Exception as e:
+        logging.error(f"Error during model training or evaluation: {str(e)}")
+        return None, None, None, None
+
+# Hyperparameters 
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+batch_size = 32
+results = []
+
+for lam in lam_values:
+    mse, history, model, predictions = train_and_evaluate_stochastic(lam, batch_size)
+    if mse is not None:
+        results.append((lam, mse))
+
+        print(f"Lambda: {lam}")
+        print(f"MSE: {mse}")
+        print("-" * 50)
+    else:
+        print(f"Skipping Lambda: {lam} due to error")
+
+print("\nSummary of Results:")
+for lam, mse in results:
+    print(f"Lambda: {lam}, MSE: {mse}")
