@@ -1,0 +1,108 @@
+# Decision Tree
+# Single-Feature Monotonicity Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.base import BaseEstimator, RegressorMixin
+import logging
+
+np.random.seed(42)
+logging.basicConfig(level=logging.INFO)
+
+# Load the dataset
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# Check the data of downtown vs non-downtown
+is_downtown = X.iloc[:, -1] == 1
+print(f"Total samples: {len(X)}")
+print(f"Downtown samples: {sum(is_downtown)}")
+print(f"Non-downtown samples: {sum(~is_downtown)}")
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=X.iloc[:, -1], random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+# Define the monotonic feature
+monotonic_feature = ['downtown_downtown']
+monotonic_index = X.columns.get_loc(monotonic_feature[0])
+
+class MonotonicDecisionTree(BaseEstimator, RegressorMixin):
+    def __init__(self, lam=0.5, max_depth=None, min_samples_split=2):
+        self.lam = lam
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.tree = DecisionTreeRegressor(max_depth=self.max_depth, min_samples_split=self.min_samples_split)
+
+    def fit(self, X, y):
+        # Apply monotonic constraint during training
+        monotonic_feature = X[:, monotonic_index]
+        modified_y = y + self.lam * monotonic_feature
+        self.tree.fit(X, modified_y)
+        return self
+
+    def predict(self, X):
+        predictions = self.tree.predict(X)
+        # Remove the monotonic effect from predictions
+        monotonic_feature = X[:, monotonic_index]
+        predictions -= self.lam * monotonic_feature
+        return predictions
+    
+def train_and_evaluate_monotonic_tree(lam, max_depth, min_samples_split, num_runs=5):
+    all_mse = []
+    for _ in range(num_runs):
+        model = MonotonicDecisionTree(lam=lam, max_depth=max_depth, min_samples_split=min_samples_split)
+        try:
+            model.fit(X_train_scaled, y_train_scaled)
+            predictions_scaled = model.predict(X_test_scaled)
+            predictions = target_scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+            mse = mean_squared_error(y_test, predictions)
+            all_mse.append(mse)
+        except Exception as e:
+            logging.error(f"Error during model training or evaluation: {str(e)}")
+    
+    if all_mse:
+        return np.mean(all_mse)
+    else:
+        return None
+
+# Hyperparameters
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1]
+max_depth = 10
+min_samples_split = 2
+
+results = []
+for lam in lam_values:
+    mse = train_and_evaluate_monotonic_tree(lam, max_depth, min_samples_split)
+    if mse is not None:
+        results.append({'lambda': lam, 'mse': mse})
+        print(f"Lambda: {lam}, MSE: {mse}")
+    else:
+        print(f"Skipping Lambda: {lam} due to error")
+
+# Create a DF for the results
+results_df = pd.DataFrame(results)
+print("\nSummary of Results:")
+print(results_df)
+
+'''
+Lambda: 0, MSE: 57.34890235040136
+Lambda: 0.2, MSE: 60.60217337786859
+Lambda: 0.4, MSE: 55.89714297803097
+Lambda: 0.6, MSE: 55.20740688511605
+Lambda: 0.8, MSE: 55.862700699035486
+Lambda: 1, MSE: 60.76954073496107
+'''
