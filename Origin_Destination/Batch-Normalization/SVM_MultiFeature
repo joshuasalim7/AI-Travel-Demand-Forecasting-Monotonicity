@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.svm import SVR
+from sklearn.base import BaseEstimator, RegressorMixin
+import logging
+
+np.random.seed(42)
+logging.basicConfig(level=logging.INFO)
+
+# Load the dataset
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# Check the data of downtown vs non-downtown
+is_downtown = X.iloc[:, -1] == 1
+print(f"Total samples: {len(X)}")
+print(f"Downtown samples: {sum(is_downtown)}")
+print(f"Non-downtown samples: {sum(~is_downtown)}")
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=X.iloc[:, -1], random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+# Define the monotonic features
+monotonic_features = [
+    'downtown_downtown',
+    'EmpDen_Des', 'EmpDen_Ori',
+    'Commuters_HW', 'Commuters_WH'
+]
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+class MonotonicSVR(BaseEstimator, RegressorMixin):
+    def __init__(self, lam=0.5, C=1.0, epsilon=0.1, kernel='rbf'):
+        self.lam = lam
+        self.C = C
+        self.epsilon = epsilon
+        self.kernel = kernel
+        self.svr = SVR(C=self.C, epsilon=self.epsilon, kernel=self.kernel)
+
+    def fit(self, X, y):
+        monotonic_features = X[:, monotonic_indices]
+        monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
+        adjusted_y = y - monotonic_effect
+        self.svr.fit(X, adjusted_y)
+        return self
+
+    def predict(self, X):
+        base_predictions = self.svr.predict(X)
+        monotonic_features = X[:, monotonic_indices]
+        monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
+        return base_predictions + monotonic_effect
+
+def train_and_evaluate_monotonic_svr(lam, C, epsilon, kernel, num_runs=5):
+    all_mse = []
+    for _ in range(num_runs):
+        model = MonotonicSVR(lam=lam, C=C, epsilon=epsilon, kernel=kernel)
+        try:
+            model.fit(X_train_scaled, y_train_scaled)
+            predictions_scaled = model.predict(X_test_scaled)
+            predictions = target_scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+            mse = mean_squared_error(y_test, predictions)
+            all_mse.append(mse)
+        except Exception as e:
+            logging.error(f"Error during model training or evaluation: {str(e)}")
+    
+    if all_mse:
+        return np.mean(all_mse)
+    else:
+        return None
+
+# Hyperparameters
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1]
+C = 1.0
+epsilon = 0.1
+kernel = 'rbf'
+
+results = []
+for lam in lam_values:
+    mse = train_and_evaluate_monotonic_svr(lam, C, epsilon, kernel)
+    if mse is not None:
+        results.append({'lambda': lam, 'mse': mse})
+        print(f"Lambda: {lam}, MSE: {mse}")
+    else:
+        print(f"Skipping Lambda: {lam} due to error")
+
+# Create a DF for the results
+results_df = pd.DataFrame(results)
+print("\nSummary of Results:")
+print(results_df)
