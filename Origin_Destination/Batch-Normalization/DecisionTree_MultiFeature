@@ -1,5 +1,5 @@
-# Decision Tree Model
-# Multi-feature Monotonicity Model 
+# Decision Tree 
+# Multi-Feature Monotonicity Model
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -51,19 +51,19 @@ class MonotonicDecisionTree(BaseEstimator, RegressorMixin):
         self.tree = DecisionTreeRegressor(max_depth=self.max_depth, min_samples_split=self.min_samples_split)
 
     def fit(self, X, y):
-        # Add monotonic features to the target
+        # Adjust the target based on monotonic features and lambda
         monotonic_features = X[:, monotonic_indices]
         monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
-        modified_y = y - monotonic_effect
+        adjusted_y = y - monotonic_effect  # Note the change from '+' to '-'
         
-        self.tree.fit(X, modified_y)
+        self.tree.fit(X, adjusted_y)
         return self
 
     def predict(self, X):
         base_predictions = self.tree.predict(X)
         monotonic_features = X[:, monotonic_indices]
         monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
-        return base_predictions + monotonic_effect
+        return base_predictions + monotonic_effect  # Note the change from '-' to '+'
 
 def train_and_evaluate_monotonic_tree(lam, max_depth, min_samples_split, num_runs=5):
     all_mse = []
@@ -101,12 +101,3 @@ for lam in lam_values:
 results_df = pd.DataFrame(results)
 print("\nSummary of Results:")
 print(results_df)
-
-'''
-Lambda: 0, MSE: 57.34890235040136
-Lambda: 0.2, MSE: 56.15481701222001
-Lambda: 0.4, MSE: 50.545999634700934
-Lambda: 0.6, MSE: 57.64299736553553
-Lambda: 0.8, MSE: 61.01627447197014
-Lambda: 1, MSE: 53.00043212460177
-'''
