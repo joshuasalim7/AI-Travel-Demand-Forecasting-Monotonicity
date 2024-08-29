@@ -1,4 +1,4 @@
-# ANN Single-Feature Model
+# ANN Single-Feature Monotonicity Model
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -14,7 +14,7 @@ np.random.seed(42)
 tf.random.set_seed(42)
 logging.basicConfig(level=logging.INFO)
 
-# Our dataset
+# Load the dataset
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
 data = data.dropna()
@@ -38,7 +38,7 @@ target_scaler = StandardScaler()
 y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
 y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
 
-# The monotonic feature
+# Define the monotonic feature
 monotonic_feature = ['downtown_downtown']
 monotonic_index = X.columns.get_loc(monotonic_feature[0])
 
@@ -102,3 +102,12 @@ for lam in lam_values:
 results_df = pd.DataFrame(results)
 print("\nSummary of Results:")
 print(results_df)
+
+'''
+Lambda: 0, MSE: 31.162466221746797
+Lambda: 0.2, MSE: 29.295110692791845
+Lambda: 0.4, MSE: 28.905563829395852
+Lambda: 0.6, MSE: 32.24295441613014
+Lambda: 0.8, MSE: 30.070986849848765
+Lambda: 1.0, MSE: 28.75691327562282
+'''
