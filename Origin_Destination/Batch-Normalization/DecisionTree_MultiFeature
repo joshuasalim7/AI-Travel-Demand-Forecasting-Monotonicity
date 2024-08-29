@@ -12,14 +12,14 @@ import logging
 np.random.seed(42)
 logging.basicConfig(level=logging.INFO)
 
-# Load the dataset
+# The dataset
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
 data = data.dropna()
 X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
 y = data['total_number_trips'] / 101
 
-# Check the data of downtown vs non-downtown
+# Check the data of downtown vs non-downtown to make sure code is working
 is_downtown = X.iloc[:, -1] == 1
 print(f"Total samples: {len(X)}")
 print(f"Downtown samples: {sum(is_downtown)}")
