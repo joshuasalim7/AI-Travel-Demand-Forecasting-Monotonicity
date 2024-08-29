@@ -54,7 +54,7 @@ class MonotonicDecisionTree(BaseEstimator, RegressorMixin):
         # Adjust the target based on monotonic features and lambda
         monotonic_features = X[:, monotonic_indices]
         monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
-        adjusted_y = y - monotonic_effect  # Note the change from '+' to '-'
+        adjusted_y = y - monotonic_effect  
         
         self.tree.fit(X, adjusted_y)
         return self
@@ -63,7 +63,7 @@ class MonotonicDecisionTree(BaseEstimator, RegressorMixin):
         base_predictions = self.tree.predict(X)
         monotonic_features = X[:, monotonic_indices]
         monotonic_effect = self.lam * np.sum(monotonic_features, axis=1)
-        return base_predictions + monotonic_effect  # Note the change from '-' to '+'
+        return base_predictions + monotonic_effect  
 
 def train_and_evaluate_monotonic_tree(lam, max_depth, min_samples_split, num_runs=5):
     all_mse = []
