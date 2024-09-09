@@ -1,0 +1,160 @@
+# MLP 3 Hidden Layers Monotonicity Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Layer, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Load and preprocess data
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# Define monotonic features
+monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+single_monotonic_index = X.columns.get_loc('downtown_downtown')
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+class MonotonicityLayer(Layer):
+    def __init__(self, lam, monotonic_indices, **kwargs):
+        super(MonotonicityLayer, self).__init__(**kwargs)
+        self.lam = lam
+        self.monotonic_indices = monotonic_indices
+
+    def build(self, input_shape):
+        self.w = self.add_weight(shape=(len(self.monotonic_indices),),
+                                 initializer='ones',
+                                 trainable=True,
+                                 constraint=tf.keras.constraints.NonNeg(),
+                                 name='monotonicity_weights')
+        super(MonotonicityLayer, self).build(input_shape)
+
+    def call(self, inputs, training=None):
+        features, predictions = inputs
+        if self.lam == 0:
+            return predictions
+        monotonic_features = tf.gather(features, self.monotonic_indices, axis=1)
+        monotonic_effects = self.lam * tf.reduce_sum(self.w * monotonic_features, axis=1, keepdims=True)
+        if training:
+            noise = tf.keras.backend.random_normal(shape=tf.shape(monotonic_effects), mean=0.0, stddev=0.1)
+            monotonic_effects += noise
+        adjusted_predictions = predictions + monotonic_effects
+        return adjusted_predictions
+
+def custom_loss(lam, monotonic_indices):
+    def loss(y_true, y_pred):
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
+        if lam > 0:
+            monotonicity_penalty = tf.reduce_mean(tf.maximum(0.0, -tf.gather(y_pred, monotonic_indices, axis=1)))
+            return (1 - lam) * mse + lam * monotonicity_penalty
+        return mse
+    return loss
+
+def create_model(input_shape, monotonic_indices, lam, learning_rate):
+    inputs = Input(shape=(input_shape,))
+    x = Dense(256, activation='relu')(inputs)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+    x = Dense(128, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+    x = Dense(64, activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = Dropout(0.3)(x)
+    predictions = Dense(1)(x)
+    
+    if lam > 0:
+        outputs = MonotonicityLayer(lam, monotonic_indices)([inputs, predictions])
+    else:
+        outputs = predictions
+
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss=custom_loss(lam, monotonic_indices))
+    return model
+
+def train_and_evaluate(monotonic_indices, lam, batch_size, learning_rate):
+    model = create_model(X_train_scaled.shape[1], monotonic_indices, lam, learning_rate)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+
+    history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_test_scaled, y_test_scaled),
+                        epochs=300, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+    predictions_scaled = model.predict(X_test_scaled)
+    predictions = target_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+
+    return mse, history, model, predictions
+
+# Train base model (λ = 0)
+base_mse, base_history, base_model, base_predictions = train_and_evaluate(monotonic_indices, 0, batch_size=32, learning_rate=0.001)
+
+# Train models with different lambda values
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+multi_feature_results = []
+single_feature_results = []
+
+for lam in lam_values:
+    if lam == 0:
+        multi_mse = base_mse
+        single_mse = base_mse
+    else:
+        multi_mse, _, _, _ = train_and_evaluate(monotonic_indices, lam, batch_size=32, learning_rate=0.001)
+        single_mse, _, _, _ = train_and_evaluate([single_monotonic_index], lam, batch_size=32, learning_rate=0.001)
+    
+    multi_feature_results.append({'lam': lam, 'mse': multi_mse})
+    single_feature_results.append({'lam': lam, 'mse': single_mse})
+    
+    print(f"Lambda: {lam}")
+    print(f"Multi-Feature MSE: {multi_mse}")
+    print(f"Single-Feature MSE: {single_mse}")
+    print()
+
+# Print results
+print("Multi-Feature Results:")
+print(pd.DataFrame(multi_feature_results))
+print("\nSingle-Feature Results:")
+print(pd.DataFrame(single_feature_results))
+
+'''
+Multi-Feature Results:
+   lam          mse
+0  0.0    44.724219
+1  0.2    38.818657
+2  0.4    41.836172
+3  0.6    40.215670
+4  0.8    35.290098
+5  1.0  1612.330982
+Single-Feature Results:
+   lam         mse
+0  0.0   44.724219
+1  0.2   47.237303
+2  0.4   47.410922
+3  0.6   38.763429
+4  0.8   42.200647
+5  1.0  293.176878
+'''
