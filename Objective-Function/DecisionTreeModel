@@ -1,0 +1,103 @@
+# Decision Tree Model
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+from sklearn.tree import DecisionTreeRegressor
+import tensorflow as tf
+
+# Set random seeds
+np.random.seed(42)
+tf.random.set_seed(42)
+
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# Define monotonic features
+monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+single_monotonic_index = X.columns.get_loc('downtown_downtown')
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+class ImprovedMonotonicDecisionTree:
+    def __init__(self, monotonic_indices, lam, max_depth=5, learning_rate=0.01, n_iterations=1000):
+        self.monotonic_indices = monotonic_indices
+        self.lam = lam
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.n_iterations = n_iterations
+        self.model = DecisionTreeRegressor(max_depth=max_depth, random_state=42)
+        self.w = np.ones(len(monotonic_indices))
+
+    def fit(self, X, y):
+        self.model.fit(X, y)
+        # Train monotonicity weights
+        for _ in range(self.n_iterations):
+            y_pred = self.predict(X)
+            gradient = self.monotonicity_gradient(X, y, y_pred)
+            self.w -= self.learning_rate * gradient  
+            self.w = np.maximum(self.w, 0)  # Constraint to non-negative weights
+
+    def predict(self, X):
+        base_pred = self.model.predict(X)
+        monotonic_features = X[:, self.monotonic_indices]
+        monotonic_effects = np.sum(self.w * monotonic_features, axis=1)
+        return base_pred + self.lam * monotonic_effects
+
+    def monotonicity_gradient(self, X, y, y_pred):
+        monotonic_features = X[:, self.monotonic_indices]
+        error = y_pred - y  
+        return np.mean(error[:, np.newaxis] * monotonic_features, axis=0)
+
+    def objective_function(self, X, y):
+        y_pred = self.predict(X)
+        mse = mean_squared_error(y, y_pred)
+        monotonicity_penalty = np.mean(np.maximum(0, -np.dot(X[:, self.monotonic_indices], self.w)))
+        return (1 - self.lam) * mse + self.lam * monotonicity_penalty
+
+def train_and_evaluate(monotonic_indices, lam):
+    model = ImprovedMonotonicDecisionTree(monotonic_indices, lam)
+    model.fit(X_train_scaled, y_train_scaled)
+    
+    predictions_scaled = model.predict(X_test_scaled)
+    predictions = target_scaler.inverse_transform(predictions_scaled.reshape(-1, 1)).flatten()
+    
+    mse = mean_squared_error(y_test, predictions)
+    return mse, model, predictions
+
+# lam hyperparameters
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+multi_feature_results = []
+single_feature_results = []
+
+for lam in lam_values:
+    multi_mse, _, _ = train_and_evaluate(monotonic_indices, lam)
+    single_mse, _, _ = train_and_evaluate([single_monotonic_index], lam)
+    
+    multi_feature_results.append({'lam': lam, 'mse': multi_mse})
+    single_feature_results.append({'lam': lam, 'mse': single_mse})
+    
+    print(f"Lambda: {lam}")
+    print(f"Multi-Feature MSE: {multi_mse}")
+    print(f"Single-Feature MSE: {single_mse}")
+    print()
+
+
+print("Multi-Feature Results:")
+print(pd.DataFrame(multi_feature_results))
+print("\nSingle-Feature Results:")
+print(pd.DataFrame(single_feature_results))
