@@ -1,4 +1,4 @@
-# MLP 3 Hidden Layers Monotonicity Model
+# MLP 3 Hidden Layer Monotonicity Model  
 # Iterate thru every single feature 
 import pandas as pd
 import numpy as np
@@ -11,7 +11,7 @@ from tensorflow.keras.layers import Dense, Input, Layer, Dropout, BatchNormaliza
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-# Set random seeds
+# Set random seeds 
 np.random.seed(42)
 tf.random.set_seed(42)
 
@@ -22,7 +22,7 @@ data = data.dropna()
 X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
 y = data['total_number_trips'] / 101
 
-# Define monotonic features
+# Monotonic features
 monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
 monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
 
@@ -109,11 +109,11 @@ def train_and_evaluate(monotonic_indices, lam, batch_size, learning_rate):
 
     return mse, history, model, predictions
 
-# Train the base model for all models (λ = 0)
+# Train base model (λ = 0)
 base_mse, base_history, base_model, base_predictions = train_and_evaluate(monotonic_indices, 0, batch_size=32, learning_rate=0.001)
 
-# lam hyperparameters 
-lam_values = [0, 0.05, 0.2, 0.4, 0.6, 0.8, 1.0]
+# lambda hyperparameters
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
 multi_feature_results = []
 single_feature_results = {feature: [] for feature in monotonic_features}
 
@@ -144,6 +144,3 @@ print(pd.DataFrame(multi_feature_results))
 for feature in monotonic_features:
     print(f"\nSingle-Feature Results ({feature}):")
     print(pd.DataFrame(single_feature_results[feature]))
-
-for feature in monotonic_features:
-    print(f"MSE decreasing for single-feature model ({feature}):", verify_mse_decrease(single_feature_results[feature]))
