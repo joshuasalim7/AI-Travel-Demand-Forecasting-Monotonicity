@@ -1,4 +1,5 @@
 # MLP 3 Hidden Layers Monotonicity Model
+# Iterate thru every single feature 
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -10,11 +11,10 @@ from tensorflow.keras.layers import Dense, Input, Layer, Dropout, BatchNormaliza
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-# Set random seeds for reproducibility
+# Set random seeds
 np.random.seed(42)
 tf.random.set_seed(42)
 
-# Load and preprocess data
 file_path = './alldata_downtownTodowntown.csv'
 data = pd.read_csv(file_path)
 data = data.dropna()
@@ -25,7 +25,6 @@ y = data['total_number_trips'] / 101
 # Define monotonic features
 monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
 monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
-single_monotonic_index = X.columns.get_loc('downtown_downtown')
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
@@ -110,51 +109,41 @@ def train_and_evaluate(monotonic_indices, lam, batch_size, learning_rate):
 
     return mse, history, model, predictions
 
-# Train base model (λ = 0)
+# Train the base model for all models (λ = 0)
 base_mse, base_history, base_model, base_predictions = train_and_evaluate(monotonic_indices, 0, batch_size=32, learning_rate=0.001)
 
-# Train models with different lambda values
-lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+# lam hyperparameters 
+lam_values = [0, 0.05, 0.2, 0.4, 0.6, 0.8, 1.0]
 multi_feature_results = []
-single_feature_results = []
+single_feature_results = {feature: [] for feature in monotonic_features}
 
 for lam in lam_values:
     if lam == 0:
         multi_mse = base_mse
-        single_mse = base_mse
+        single_mse = {feature: base_mse for feature in monotonic_features}
     else:
         multi_mse, _, _, _ = train_and_evaluate(monotonic_indices, lam, batch_size=32, learning_rate=0.001)
-        single_mse, _, _, _ = train_and_evaluate([single_monotonic_index], lam, batch_size=32, learning_rate=0.001)
+        single_mse = {}
+        for feature in monotonic_features:
+            feature_index = [X.columns.get_loc(feature)]
+            single_mse[feature], _, _, _ = train_and_evaluate(feature_index, lam, batch_size=32, learning_rate=0.001)
     
     multi_feature_results.append({'lam': lam, 'mse': multi_mse})
-    single_feature_results.append({'lam': lam, 'mse': single_mse})
+    for feature in monotonic_features:
+        single_feature_results[feature].append({'lam': lam, 'mse': single_mse[feature]})
     
     print(f"Lambda: {lam}")
     print(f"Multi-Feature MSE: {multi_mse}")
-    print(f"Single-Feature MSE: {single_mse}")
+    for feature in monotonic_features:
+        print(f"Single-Feature MSE ({feature}): {single_mse[feature]}")
     print()
 
-# Print results
 print("Multi-Feature Results:")
 print(pd.DataFrame(multi_feature_results))
-print("\nSingle-Feature Results:")
-print(pd.DataFrame(single_feature_results))
 
-'''
-Multi-Feature Results:
-   lam          mse
-0  0.0    44.724219
-1  0.2    38.818657
-2  0.4    41.836172
-3  0.6    40.215670
-4  0.8    35.290098
-5  1.0  1612.330982
-Single-Feature Results:
-   lam         mse
-0  0.0   44.724219
-1  0.2   47.237303
-2  0.4   47.410922
-3  0.6   38.763429
-4  0.8   42.200647
-5  1.0  293.176878
-'''
+for feature in monotonic_features:
+    print(f"\nSingle-Feature Results ({feature}):")
+    print(pd.DataFrame(single_feature_results[feature]))
+
+for feature in monotonic_features:
+    print(f"MSE decreasing for single-feature model ({feature}):", verify_mse_decrease(single_feature_results[feature]))
