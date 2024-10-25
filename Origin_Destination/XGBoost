@@ -1,0 +1,155 @@
+# XGBoost Model w Monotonicity Constraint  
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import xgboost as xgb
+
+# Set random seed
+np.random.seed(42)
+
+# Data Preprocessing 
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101  # For regression-like tasks
+
+# The monotonic features
+monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Monotonicity constraints: 1 for increasing, -1 for decreasing, 0 for no constraint
+# Here we assume all monotonic features should be increasing
+
+def create_monotonic_constraints(single_index=None):
+    # 1 if monotonicity should be enforced, 0 otherwise
+    if single_index is None:
+        # Multi-feature constraint (all features constrained)
+        return [1 if i in monotonic_indices else 0 for i in range(X_train.shape[1])]
+    else:
+        # Single feature constraint (only one feature constrained)
+        return [1 if i == single_index else 0 for i in range(X_train.shape[1])]
+
+# Function to train and evaluate the XGBoost model with monotonicity constraints
+def train_and_evaluate(monotonic_constraints, lam, n_estimators=500, learning_rate=0.01):
+    model = xgb.XGBRegressor(
+        objective='reg:squarederror',
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        monotone_constraints=tuple(monotonic_constraints)
+    )
+
+    model.fit(X_train_scaled, y_train)
+
+    predictions = model.predict(X_test_scaled)
+    mse = mean_squared_error(y_test, predictions)
+
+    return mse, model, predictions
+
+# Train baseline XGBoost model (no monotonicity constraints)
+baseline_mse, baseline_model, baseline_predictions = train_and_evaluate([0] * X_train.shape[1], lam=0)
+
+# Hyperparameter
+lam_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+multi_feature_results = []
+single_feature_results = {feature: [] for feature in monotonic_features}
+
+# Multi-feature loop
+for lam in lam_values:
+    if lam == 0:
+        multi_mse = baseline_mse
+        multi_predictions = baseline_predictions
+    else:
+        # Apply monotonic constraints to all monotonic features
+        monotonic_constraints = create_monotonic_constraints()
+        multi_mse, multi_model, multi_predictions = train_and_evaluate(monotonic_constraints, lam)
+    
+    multi_feature_results.append({'lam': lam, 'mse': multi_mse})
+    
+    print(f"Lambda: {lam}")
+    print(f"Multi-Feature MSE: {multi_mse}")
+
+# Single-feature loop for each feature in monotonic_features
+for feature in monotonic_features:
+    single_index = X.columns.get_loc(feature)
+    for lam in lam_values:
+        if lam == 0:
+            single_mse = baseline_mse
+        else:
+            # Apply monotonic constraint to a single feature
+            monotonic_constraints = create_monotonic_constraints(single_index)
+            single_mse, single_model, single_predictions = train_and_evaluate(monotonic_constraints, lam)
+        
+        single_feature_results[feature].append({'lam': lam, 'mse': single_mse})
+
+        print(f"Lambda: {lam}")
+        print(f"{feature} Single-Feature MSE: {single_mse}")
+    print()
+
+print("\nMulti-Feature Results:")
+print(pd.DataFrame(multi_feature_results))
+
+# Print single-feature result for each monotonic feature
+for feature in monotonic_features:
+    print(f"\n{feature} Single-Feature Results:")
+    print(pd.DataFrame(single_feature_results[feature]))
+
+'''
+Multi-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  44.725865
+2  0.4  44.725865
+3  0.6  44.725865
+4  0.8  44.725865
+5  1.0  44.725865
+downtown_downtown Single-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  35.894555
+2  0.4  35.894555
+3  0.6  35.894555
+4  0.8  35.894555
+5  1.0  35.894555
+EmpDen_Des Single-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  38.172887
+2  0.4  38.172887
+3  0.6  38.172887
+4  0.8  38.172887
+5  1.0  38.172887
+EmpDen_Ori Single-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  38.325898
+2  0.4  38.325898
+3  0.6  38.325898
+4  0.8  38.325898
+5  1.0  38.325898
+Commuters_HW Single-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  40.259210
+2  0.4  40.259210
+3  0.6  40.259210
+4  0.8  40.259210
+5  1.0  40.259210
+Commuters_WH Single-Feature Results:
+   lam        mse
+0  0.0  38.285776
+1  0.2  35.877516
+2  0.4  35.877516
+3  0.6  35.877516
+4  0.8  35.877516
+5  1.0  35.877516
+'''
