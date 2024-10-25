@@ -28,8 +28,7 @@ X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
 # Monotonicity constraints: 1 for increasing, -1 for decreasing, 0 for no constraint
-# Here we assume all monotonic features should be increasing
-
+# All monotonic features should be increasing for our target: total_number_trips
 def create_monotonic_constraints(single_index=None):
     # 1 if monotonicity should be enforced, 0 otherwise
     if single_index is None:
@@ -39,7 +38,7 @@ def create_monotonic_constraints(single_index=None):
         # Single feature constraint (only one feature constrained)
         return [1 if i == single_index else 0 for i in range(X_train.shape[1])]
 
-# Function to train and evaluate the XGBoost model with monotonicity constraints
+# Train and evaluate our XGBoost Model
 def train_and_evaluate(monotonic_constraints, lam, n_estimators=500, learning_rate=0.01):
     model = xgb.XGBRegressor(
         objective='reg:squarederror',
