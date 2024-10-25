@@ -1,0 +1,108 @@
+# MLP 5 Hidden Layer finetune 
+# Loop Thru ALl Single Feature 
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Input, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+
+# Set random seeds
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Load and preprocess data
+file_path = './alldata_downtownTodowntown.csv'
+data = pd.read_csv(file_path)
+data = data.dropna()
+
+X = data.drop(columns=['total_number_trips', 'Unnamed: 0'])
+y = data['total_number_trips'] / 101
+
+# The monotonic features
+monotonic_features = ['downtown_downtown', 'EmpDen_Des', 'EmpDen_Ori', 'Commuters_HW', 'Commuters_WH']
+monotonic_indices = [X.columns.get_loc(col) for col in monotonic_features]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+target_scaler = StandardScaler()
+y_train_scaled = target_scaler.fit_transform(y_train.values.reshape(-1, 1)).flatten()
+y_test_scaled = target_scaler.transform(y_test.values.reshape(-1, 1)).flatten()
+
+def monotonicity_regularization(y_pred, X, monotonic_indices):
+    violations = tf.constant(0.0)
+    for idx in monotonic_indices:
+        sorted_indices = tf.argsort(X[:, idx])
+        sorted_predictions = tf.gather(y_pred, sorted_indices)
+        violations += tf.reduce_sum(tf.square(tf.maximum(0.0, -(sorted_predictions[1:] - sorted_predictions[:-1]))))
+    return violations / tf.cast(tf.shape(X)[0], tf.float32)
+
+def custom_loss(lam, monotonic_indices):
+    def loss(y_true, y_pred):
+        mse = tf.keras.losses.mean_squared_error(y_true, y_pred)
+        reg = monotonicity_regularization(y_pred, X_train_scaled, monotonic_indices)
+        return mse + lam * reg
+    return loss
+
+def create_mlp_model(input_shape, monotonic_indices, lam, learning_rate):
+    inputs = Input(shape=(input_shape,))
+    x = Dense(256, activation='relu')(inputs)
+    x = Dropout(0.2)(x)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.2)(x)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.2)(x)
+    x = Dense(32, activation='relu')(x)
+    x = Dropout(0.2)(x)
+    x = Dense(16, activation='relu')(x)
+    outputs = Dense(1)(x)
+
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss=custom_loss(lam, monotonic_indices))
+    return model
+
+def train_and_evaluate(monotonic_indices, lam, batch_size, learning_rate, epochs):
+    model = create_mlp_model(X_train_scaled.shape[1], monotonic_indices, lam, learning_rate)
+
+    early_stopping = EarlyStopping(monitor='val_loss', patience=50, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=20, min_lr=0.0001)
+
+    history = model.fit(X_train_scaled, y_train_scaled, validation_data=(X_test_scaled, y_test_scaled),
+                        epochs=epochs, batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+    predictions_scaled = model.predict(X_test_scaled)
+    predictions = target_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+
+    return mse, model, predictions
+
+def find_optimal_lambda(feature_indices, lam_range, steps):
+    best_mse = float('inf')
+    best_lam = None
+    
+    for lam in np.linspace(lam_range[0], lam_range[1], steps):
+        mse, _, _ = train_and_evaluate(feature_indices, lam, batch_size=32, learning_rate=0.001, epochs=1000)
+        if mse < best_mse:
+            best_mse = mse
+            best_lam = lam
+    
+    return best_lam, best_mse
+
+# Find optimal lambda for multi-feature model
+multi_best_lam, multi_best_mse = find_optimal_lambda(monotonic_indices, (0.6, 0.8), 20)
+print(f"Multi-Feature - Best Lambda: {multi_best_lam:.4f}, Best MSE: {multi_best_mse:.6f}")
+
+# Find optimal lambda for each single-feature model
+for feature in monotonic_features:
+    single_index = [X.columns.get_loc(feature)]
+    single_best_lam, single_best_mse = find_optimal_lambda(single_index, (0.6, 0.8), 20)
+    print(f"{feature} - Best Lambda: {single_best_lam:.4f}, Best MSE: {single_best_mse:.6f}")
